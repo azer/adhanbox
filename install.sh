@@ -101,6 +101,7 @@ list_ports() {
       [ "$v" = 303a ] && echo "$p"
     done
   fi
+  return 0
 }
 
 if [ -z "$PORT" ]; then
