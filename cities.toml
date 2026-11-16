@@ -1,0 +1,175 @@
+# EzanBox city list. Row order is the on-device list order:
+# Istanbul first, Berlin second (default), then one city per UTC offset, west to east.
+# diyanet_id = district ("ilçe") ID from ezanvakti.emushaf.net /ilceler/{sehirId}.
+# tz = IANA zone; the POSIX TZ string is generated from the system zoneinfo by `cargo xtask cities`.
+# −03:30 (St. John's) is omitted: Diyanet has no entry for Newfoundland.
+
+default = "berlin"
+
+[[city]]
+key = "istanbul"
+name = "Istanbul"
+tz = "Europe/Istanbul"
+diyanet_id = 9541
+
+[[city]]
+key = "berlin"
+name = "Berlin"
+tz = "Europe/Berlin"
+diyanet_id = 11002
+
+[[city]]
+key = "honolulu"
+name = "Honolulu"
+tz = "Pacific/Honolulu"
+diyanet_id = 8753
+
+[[city]]
+key = "anchorage"
+name = "Anchorage"
+tz = "America/Anchorage"
+diyanet_id = 8584
+
+[[city]]
+key = "los-angeles"
+name = "Los Angeles"
+tz = "America/Los_Angeles"
+diyanet_id = 8626
+
+[[city]]
+key = "denver"
+name = "Denver"
+tz = "America/Denver"
+diyanet_id = 8669
+
+[[city]]
+key = "chicago"
+name = "Chicago"
+tz = "America/Chicago"
+diyanet_id = 8760
+
+[[city]]
+key = "new-york"
+name = "New York"
+tz = "America/New_York"
+diyanet_id = 8903
+
+[[city]]
+key = "santiago"
+name = "Santiago"
+tz = "America/Santiago"
+diyanet_id = 16190
+
+[[city]]
+key = "sao-paulo"
+name = "São Paulo"
+tz = "America/Sao_Paulo"
+diyanet_id = 12197
+
+[[city]]
+key = "nuuk"
+name = "Nuuk"
+tz = "America/Nuuk"
+diyanet_id = 13452
+
+[[city]]
+key = "praia"
+name = "Praia"
+tz = "Atlantic/Cape_Verde"
+diyanet_id = 16642
+
+[[city]]
+key = "london"
+name = "London"
+tz = "Europe/London"
+diyanet_id = 14096
+
+[[city]]
+key = "cairo"
+name = "Cairo"
+tz = "Africa/Cairo"
+diyanet_id = 15474
+
+[[city]]
+key = "tehran"
+name = "Tehran"
+tz = "Asia/Tehran"
+diyanet_id = 14177
+
+[[city]]
+key = "dubai"
+name = "Dubai"
+tz = "Asia/Dubai"
+diyanet_id = 11947
+
+[[city]]
+key = "kabul"
+name = "Kabul"
+tz = "Asia/Kabul"
+diyanet_id = 9972
+
+[[city]]
+key = "karachi"
+name = "Karachi"
+tz = "Asia/Karachi"
+diyanet_id = 15767
+
+[[city]]
+key = "new-delhi"
+name = "New Delhi"
+tz = "Asia/Kolkata"
+diyanet_id = 13680
+
+[[city]]
+key = "kathmandu"
+name = "Kathmandu"
+tz = "Asia/Kathmandu"
+diyanet_id = 15563
+
+[[city]]
+key = "dhaka"
+name = "Dhaka"
+tz = "Asia/Dhaka"
+diyanet_id = 11672
+
+[[city]]
+key = "yangon"
+name = "Yangon"
+tz = "Asia/Yangon"
+diyanet_id = 12264
+
+[[city]]
+key = "jakarta"
+name = "Jakarta"
+tz = "Asia/Jakarta"
+diyanet_id = 12726
+
+[[city]]
+key = "kuala-lumpur"
+name = "Kuala Lumpur"
+tz = "Asia/Kuala_Lumpur"
+diyanet_id = 15344
+
+[[city]]
+key = "tokyo"
+name = "Tokyo"
+tz = "Asia/Tokyo"
+diyanet_id = 14833
+
+[[city]]
+key = "adelaide"
+name = "Adelaide"
+tz = "Australia/Adelaide"
+diyanet_id = 11426
+
+[[city]]
+key = "sydney"
+name = "Sydney"
+tz = "Australia/Sydney"
+diyanet_id = 22182
+
+[[city]]
+key = "auckland"
+name = "Auckland"
+tz = "Pacific/Auckland"
+diyanet_id = 16640

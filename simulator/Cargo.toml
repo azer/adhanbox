@@ -1,0 +1,9 @@
+[package]
+name = "simulator"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+ezanbox-core = { path = "../core", features = ["std"] }
+png = "0.18"

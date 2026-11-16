@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AdhanBox Installer</title>
+<script type="module" src="https://unpkg.com/esp-web-tools@10.1.0/dist/web/install-button.js?module"></script>
+<style>
+  :root { --bg: #fafaf7; --fg: #1a1a1a; --muted: #6b6b66; --line: #e2e2dc; --accent: #1f6f4a; --code: #f0f0ea; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #131312; --fg: #ececea; --muted: #9a9a94; --line: #2c2c2a; --accent: #4fbf8a; --code: #1d1d1b; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 620px; margin: 0 auto; padding: 56px 16px 80px; }
+  h1 { font-size: 2.2rem; margin: 0 0 4px; letter-spacing: -0.02em; }
+  .sub { color: var(--muted); margin: 0 0 40px; }
+  h2 { font-size: 1rem; margin: 36px 0 8px; }
+  ol { padding-left: 1.2em; margin: 0; }
+  li { margin: 6px 0; }
+  .box { border: 1px solid var(--line); border-radius: 12px; padding: 24px; margin: 24px 0; }
+  esp-web-install-button button[slot="activate"] {
+    background: var(--accent); color: #fff; border: 0; border-radius: 8px; padding: 12px 22px; font: 600 1rem system-ui, sans-serif; cursor: pointer;
+  }
+  .note { color: var(--muted); font-size: 0.9rem; }
+  code { background: var(--code); padding: 2px 6px; border-radius: 4px; font-size: 0.9em; overflow-wrap: anywhere; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>AdhanBox</h1>
+  <p class="sub">E-ink prayer times and adhan for the Waveshare ESP32-S3-ePaper-1.54 (V2).</p>
+
+  <div class="box">
+    <ol>
+      <li>Plug the board into this computer with a USB-C <em>data</em> cable.</li>
+      <li>Click <strong>Install</strong> and pick the port that appears (often “USB JTAG/serial debug unit”).</li>
+      <li>Wait about two minutes while the firmware and adhan audio are written.</li>
+    </ol>
+    <p style="margin-top:20px">
+      <esp-web-install-button manifest="manifest.json">
+        <button slot="activate">Install AdhanBox</button>
+        <span slot="unsupported">Your browser can't talk to USB devices. Open this page in Chrome or Edge on a computer.</span>
+        <span slot="not-allowed">This page must be opened over https.</span>
+      </esp-web-install-button>
+    </p>
+    <p class="note">Works in Chrome and Edge on macOS, Windows and Linux. Nothing to install.</p>
+  </div>
+
+  <h2>After installing</h2>
+  <ol>
+    <li>The board restarts and shows the welcome screen. Press any button.</li>
+    <li>Scan the QR code with your phone to join the <code>AdhanBox-XXXX</code> network.</li>
+    <li>Pick your Wi-Fi (2.4 GHz) and your city on the page that opens.</li>
+  </ol>
+
+  <h2>Prefer the terminal?</h2>
+  <p>On macOS or Linux:</p>
+  <p><code>curl -fsSL https://raw.githubusercontent.com/azer/adhanbox/main/install.sh | sh</code></p>
+
+  <p class="note" style="margin-top:40px">Source and docs: <a href="https://github.com/azer/adhanbox">github.com/azer/adhanbox</a></p>
+</main>
+</body>
+</html>

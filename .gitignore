@@ -1,0 +1,8 @@
+target/
+/assets/ezan/*.mp3
+/assets/ezan/*.bin
+.env
+firmware/target/
+firmware/.embuild/
+firmware/.tools/
+dist/

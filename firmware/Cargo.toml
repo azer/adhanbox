@@ -1,0 +1,35 @@
+[package]
+name = "ezanbox"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[[bin]]
+name = "ezanbox"
+harness = false
+
+[profile.release]
+opt-level = "s"
+debug = true
+
+[profile.release.package.nanomp3-core]
+opt-level = 1
+
+[profile.dev]
+debug = true
+opt-level = "z"
+
+[dependencies]
+log = "0.4"
+anyhow = "1"
+esp-idf-svc = { version = "0.53", features = ["critical-section"] }
+ezanbox-core = { path = "../core", features = ["std"] }
+embedded-graphics = "0.8"
+nanomp3 = { version = "0.2", default-features = false, features = ["std"] }
+
+[build-dependencies]
+embuild = "0.33"
+
+# Xtensa LLVM crashes on nanomp3-core l3_decode at s/2/3 ("Cannot select: Constant<4608>").
+[profile.dev.package.nanomp3-core]
+opt-level = 1
