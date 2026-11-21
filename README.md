@@ -10,7 +10,8 @@ A small e-ink prayer clock that plays the adhan. It shows the next prayer and th
 
 - **Next prayer at a glance.** A big countdown, refreshed every minute.
 - **Diyanet times** for about 33 cities, one per timezone. They're cached for a month, so it keeps working when Wi-Fi is down.
-- **Adhan at every prayer**, each in its own makam (Saba, Uşşak, Rast, Segâh, Hicaz). Turn it on or off per prayer, and set the volume.
+- **Adhan at every prayer**, each in its own makam (Saba, Uşşak, Rast, Segâh, Hicaz). Turn it on or off per prayer, and set the volume. Fajr can have its own, quieter volume.
+- **Sonos, optionally.** Tick the Sonos speakers the adhan should play on. It plays at its own volume whatever the speaker was set to, and puts the speaker back afterwards. If a speaker is not provably playing within 5 seconds, or Wi-Fi is down, the box's own speaker plays instead.
 - **Setup from your phone.** Scan the QR code on the screen, pick your Wi-Fi and city. No app.
 - **Correct clock, no fiddling.** Time comes from the internet and follows your city's daylight saving rules. A backup clock chip keeps time when offline.
 
@@ -76,7 +77,9 @@ There are two buttons on the side: **top** (BOOT) and **bottom** (PWR).
 | Volume | louder | quieter | done |
 | Adhan playing | stop | stop | stop |
 
-The menu has **City**, **Adhan** (on/off per prayer), **Volume**, **Wi-Fi** and **Reset**.
+The menu has **City**, **Adhan** (on/off per prayer), **Volume**, **Fajr volume**, **Sonos**, **Test adhan**, **Wi-Fi**, **About** and **Reset**.
+
+**Sonos** has its own on/off switch, volume, Fajr volume and a **Speakers** screen that finds the speakers on your Wi-Fi; hold top to tick one. Ticking a speaker switches Sonos on. With Sonos off the box behaves exactly as without it. No Sonos account is needed. Limits: stopping the adhan from the Sonos app makes the box play it on its own speaker (use the box's button to stop both), and AirPlay music does not resume by itself afterwards. Design and test notes: [docs/proposal-sonos-fajr-ramadan.md](docs/proposal-sonos-fajr-ramadan.md).
 
 **Stuck?** Hold the top button for 10 seconds on any screen to reach the reset screen. It still asks before erasing anything. If the screen stays blank after plugging in, unplug and plug back in without holding any button (holding BOOT while plugging in puts the chip into flashing mode). As a last resort, re-run the installer with `--erase`.
 
@@ -95,7 +98,7 @@ You only need this section to change the code.
 | `core/` | Shared logic and UI: scheduling, Diyanet parser, cities, screens (tested on the host) |
 | `firmware/` | ESP32-S3 binary (Rust std on ESP-IDF 5.4, `esp` toolchain) |
 | `simulator/` | Renders every screen to `target/screens/*.png` |
-| `xtask/` | Host tools: cities, audio pack, flash, release, setup, reset, log |
+| `xtask/` | Host tools: cities, audio pack, flash, release, setup, reset, log, sonos |
 | `web/` | Browser installer, published to GitHub Pages on each release |
 | `install.sh` | Terminal installer |
 | `cities.toml` | City list (order = on-device order) |
@@ -124,6 +127,8 @@ cargo xtask log --secs 30                    # print device output
 cargo xtask status                           # city, clock, cached days, next prayer
 cargo xtask setup --ssid "Net" --pass "pw" --city berlin   # Wi-Fi + city over USB
 cargo xtask sync                             # fetch times now
+cargo xtask sonos scan                       # list Sonos speakers, using the firmware's own Sonos code
+cargo xtask sonos play "Living Room" --secs 8   # play an adhan on a speaker from this computer
 cargo xtask reset [--all]                    # clear settings (--all: also erase audio)
 cargo xtask cities                           # regenerate core/src/cities_gen.rs
 cargo xtask release                          # build the release files into dist/

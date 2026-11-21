@@ -20,6 +20,7 @@ const GAIN: [f32; 7] = [0.0, 0.05, 0.10, 0.18, 0.30, 0.50, 0.80];
 
 /// The `audio` partition, memory-mapped once. Reading mapped flash needs no flash API calls,
 /// which matters because the audio thread's stack lives in PSRAM (flash ops would disable it).
+#[derive(Clone, Copy)]
 pub struct Partition {
     data: &'static [u8],
 }
@@ -260,6 +261,8 @@ pub struct Audio {
     stop: Arc<AtomicBool>,
     volume: Arc<AtomicU8>,
     pub available: bool,
+    /// The adhan pack, for serving recordings to network speakers.
+    pub pack: Option<Partition>,
 }
 
 impl Audio {
@@ -274,6 +277,7 @@ impl Audio {
         let stop = Arc::new(AtomicBool::new(false));
         let vol = Arc::new(AtomicU8::new(volume));
         let part = Partition::find();
+        let pack = part;
         let available = part.as_ref().map(|p| p.entry(0).is_ok()).unwrap_or(false);
         if !available {
             log::warn!("audio: no adhan pack in flash; run `cargo xtask flash-audio`");
@@ -318,7 +322,7 @@ impl Audio {
             let def = sys::esp_pthread_get_default_config();
             sys::esp_pthread_set_cfg(&def);
         }
-        Self { tx, playing, stop, volume: vol, available }
+        Self { tx, playing, stop, volume: vol, available, pack }
     }
 
     pub fn play(&self, slot: u8, loop_ms: Option<u32>) {

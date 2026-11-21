@@ -15,6 +15,55 @@ pub struct Settings {
     pub adhan_mask: u8,
     pub setup_done: bool,
     pub last_sync_ok: i64,
+    /// Box-speaker volume for Fajr; 0 = same as `volume`.
+    pub fajr_volume: u8,
+    pub sonos_on: bool,
+    /// Sonos volume step 1..=VOLUME_MAX (mapped to a Sonos level by `sonos::step_volume`).
+    pub sonos_volume: u8,
+    /// Sonos volume step for Fajr; 0 = same as `sonos_volume`.
+    pub sonos_fajr: u8,
+    /// Ticked Sonos speakers.
+    pub sonos_rooms: Vec<Room>,
+}
+
+/// A ticked Sonos speaker. `ip` is only a hint for finding it quickly next time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Room {
+    pub id: String,
+    pub name: String,
+    pub ip: std::net::Ipv4Addr,
+}
+
+pub const ROOMS_MAX: usize = 8;
+
+fn encode_rooms(rooms: &[Room]) -> String {
+    rooms.iter().take(ROOMS_MAX).map(|r| format!("{}\t{}\t{}\n", r.id, r.ip, r.name.replace(['\t', '\n'], " "))).collect()
+}
+
+fn decode_rooms(s: &str) -> Vec<Room> {
+    s.lines()
+        .filter_map(|l| {
+            let mut it = l.splitn(3, '\t');
+            Some(Room { id: it.next()?.to_string(), ip: it.next()?.parse().ok()?, name: it.next()?.to_string() })
+        })
+        .filter(|r| !r.id.is_empty())
+        .take(ROOMS_MAX)
+        .collect()
+}
+
+impl Settings {
+    /// Box-speaker volume step for the adhan in `slot` (0 = Fajr).
+    pub fn volume_for(&self, slot: u8) -> u8 {
+        if slot == 0 && self.fajr_volume != 0 { self.fajr_volume } else { self.volume }
+    }
+    /// Sonos volume step for the adhan in `slot`.
+    pub fn sonos_step_for(&self, slot: u8) -> u8 {
+        if slot == 0 && self.sonos_fajr != 0 { self.sonos_fajr } else { self.sonos_volume }
+    }
+    /// Sonos is switched on and has somewhere to play.
+    pub fn sonos_active(&self) -> bool {
+        self.sonos_on && !self.sonos_rooms.is_empty() && !self.ssid.is_empty()
+    }
 }
 
 impl Default for Settings {
@@ -27,6 +76,11 @@ impl Default for Settings {
             adhan_mask: ADHAN_ALL,
             setup_done: false,
             last_sync_ok: 0,
+            fajr_volume: 0,
+            sonos_on: false,
+            sonos_volume: 3,
+            sonos_fajr: 0,
+            sonos_rooms: Vec::new(),
         }
     }
 }
@@ -35,7 +89,9 @@ pub struct Store {
     nvs: EspNvs<NvsDefault>,
 }
 
-const KEYS: [&str; 9] = ["ssid", "pass", "city", "volume", "adhan", "setup", "lastsync", "cache", "cachecity"];
+const KEYS: [&str; 14] = [
+    "ssid", "pass", "city", "volume", "adhan", "setup", "lastsync", "cache", "cachecity", "fajrvol", "sonos", "sonosvol", "sonosfajr", "sonosrooms",
+];
 
 impl Store {
     pub fn new(part: EspDefaultNvsPartition) -> anyhow::Result<Self> {
@@ -43,7 +99,7 @@ impl Store {
     }
 
     fn get_string(&self, k: &str) -> String {
-        let mut buf = [0u8; 128];
+        let mut buf = [0u8; 768];
         self.nvs.get_str(k, &mut buf).ok().flatten().unwrap_or("").to_string()
     }
 
@@ -58,6 +114,11 @@ impl Store {
             adhan_mask: self.nvs.get_u8("adhan").ok().flatten().unwrap_or(d.adhan_mask),
             setup_done: self.nvs.get_u8("setup").ok().flatten().unwrap_or(0) == 1,
             last_sync_ok: self.nvs.get_i64("lastsync").ok().flatten().unwrap_or(0),
+            fajr_volume: self.nvs.get_u8("fajrvol").ok().flatten().unwrap_or(0).min(VOLUME_MAX),
+            sonos_on: self.nvs.get_u8("sonos").ok().flatten().unwrap_or(0) == 1,
+            sonos_volume: self.nvs.get_u8("sonosvol").ok().flatten().unwrap_or(d.sonos_volume).clamp(1, VOLUME_MAX),
+            sonos_fajr: self.nvs.get_u8("sonosfajr").ok().flatten().unwrap_or(0).min(VOLUME_MAX),
+            sonos_rooms: decode_rooms(&self.get_string("sonosrooms")),
         }
     }
 
@@ -71,6 +132,11 @@ impl Store {
             self.nvs.set_u8("adhan", s.adhan_mask)?;
             self.nvs.set_u8("setup", s.setup_done as u8)?;
             self.nvs.set_i64("lastsync", s.last_sync_ok)?;
+            self.nvs.set_u8("fajrvol", s.fajr_volume)?;
+            self.nvs.set_u8("sonos", s.sonos_on as u8)?;
+            self.nvs.set_u8("sonosvol", s.sonos_volume)?;
+            self.nvs.set_u8("sonosfajr", s.sonos_fajr)?;
+            self.nvs.set_str("sonosrooms", &encode_rooms(&s.sonos_rooms))?;
             Ok(())
         })();
         if let Err(e) = r {

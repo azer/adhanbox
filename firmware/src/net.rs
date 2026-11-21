@@ -178,6 +178,36 @@ impl Net {
         self.connect_inner(ssid)
     }
 
+    /// The box's own address on the Wi-Fi network, once connected.
+    pub fn sta_ip(&self) -> Option<std::net::Ipv4Addr> {
+        self.wifi.wifi().sta_netif().get_ip_info().ok().map(|i| i.ip).filter(|ip| !ip.is_unspecified())
+    }
+
+    /// Station connect with a hard time limit and no diagnosis afterwards (before a prayer:
+    /// either Wi-Fi is up in time or the box plays on its own speaker).
+    pub fn connect_quick(&mut self, ssid: &str, pass: &str, limit: Duration) -> bool {
+        if self.is_connected() && self.wifi.wifi().sta_netif().get_ip_info().map(|i| !i.ip.is_unspecified()).unwrap_or(false) {
+            return true;
+        }
+        let _ = self.wifi.stop();
+        if self.wifi.set_configuration(&Configuration::Client(Self::client(ssid, pass))).is_err() || self.wifi.start().is_err() {
+            return false;
+        }
+        let start = Instant::now();
+        let mut asked = None::<Instant>;
+        while start.elapsed() < limit {
+            if asked.map_or(true, |t| t.elapsed() > Duration::from_secs(6)) {
+                let _ = self.wifi.wifi_mut().connect();
+                asked = Some(Instant::now());
+            }
+            if self.wifi.is_connected().unwrap_or(false) && self.wifi.wifi().sta_netif().get_ip_info().map(|i| !i.ip.is_unspecified()).unwrap_or(false) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        false
+    }
+
     fn connect_inner(&mut self, ssid: &str) -> Result<(), ConnectError> {
         let start = Instant::now();
         let mut last_reason = 0u32;

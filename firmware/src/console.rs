@@ -14,6 +14,12 @@ pub enum Cmd {
     /// Simulated button: (boot?, long?)
     Key(bool, bool),
     Stop,
+    /// Menu → Test adhan, from the console.
+    Adhan,
+    /// Pretend the next prayer is N minutes from now (until restart), to run the real trigger.
+    AdhanIn(u16),
+    /// `sonos <scan|on|off|tick NAME|untick NAME|vol N|fajr N>`
+    Sonos(String),
 }
 
 pub fn start() -> Receiver<Cmd> {
@@ -44,6 +50,11 @@ pub fn start() -> Receiver<Cmd> {
                     "setup" => Some(Cmd::Setup),
                     "play" => Some(Cmd::Play(args.trim().parse().unwrap_or(1))),
                     "stop" => Some(Cmd::Stop),
+                    "adhan" => match args.trim().strip_prefix("in ") {
+                        Some(n) => Some(Cmd::AdhanIn(n.trim().parse().unwrap_or(2).clamp(1, 30))),
+                        None => Some(Cmd::Adhan),
+                    },
+                    "sonos" => Some(Cmd::Sonos(args.trim().to_string())),
                     "key" => {
                         let mut it = args.split_whitespace();
                         let b = matches!(it.next(), Some("top" | "boot"));

@@ -304,12 +304,17 @@ fn cross(f: &mut Frame, x: i32, y: i32) {
 
 /// Volume screen (setup step 5 and Menu → Volume).
 pub fn volume(f: &mut Frame, heading: &str, step: Option<&str>, level: u8, max: u8, playing: bool, hint_right: &str) {
+    let status = if playing { "Playing adhan sample..." } else { "" };
+    level_bars(f, heading, step, status, "Volume", level, max, ["Top louder, bottom quieter", "No sound? Check the speaker plug."], hint_right);
+}
+
+/// A level picker: status line, label, `max` bars with `level` filled, two help lines.
+#[allow(clippy::too_many_arguments)]
+pub fn level_bars(f: &mut Frame, heading: &str, step: Option<&str>, status: &str, label: &str, level: u8, max: u8, help: [&str; 2], hint_right: &str) {
     f.clear_white();
     title(f, heading, step);
-    if playing {
-        text(f, &F_BODY, "Playing adhan sample...", M, 56, Align::Left, INK);
-    }
-    text(f, &F_BODY_B, "Volume", M, 88, Align::Left, INK);
+    text(f, &F_BODY, status, M, 56, Align::Left, INK);
+    text(f, &F_BODY_B, label, M, 88, Align::Left, INK);
     let bw = ((W - 2 * M) - (max as i32 - 1) * 4) / max as i32;
     for i in 0..max {
         let x = M + i as i32 * (bw + 4);
@@ -321,8 +326,8 @@ pub fn volume(f: &mut Frame, heading: &str, step: Option<&str>, level: u8, max: 
             outline(f, x, y, bw as u32, hgt as u32, INK);
         }
     }
-    text(f, &F_BODY, "Top louder, bottom quieter", M, 140, Align::Left, INK);
-    text(f, &F_SMALL, "No sound? Check the speaker plug.", M, 160, Align::Left, INK);
+    text(f, &F_BODY, help[0], M, 140, Align::Left, INK);
+    text(f, &F_SMALL, help[1], M, 160, Align::Left, INK);
     nav_hints(f, hint_right);
 }
 

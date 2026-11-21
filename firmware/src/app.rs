@@ -7,7 +7,9 @@ use crate::console::Cmd;
 use crate::epd::Epd;
 use crate::net::{self, Net};
 use crate::portal::{self, Portal, WifiState};
-use crate::store::{Settings, Store, VOLUME_MAX};
+use crate::sonos::{self, Speaker};
+use crate::sonos_task::{Player, State as Sonos};
+use crate::store::{Room, Settings, Store, ROOMS_MAX, VOLUME_MAX};
 use crate::{clock, rtc};
 use esp_idf_svc::hal::i2c::I2cDriver;
 use ezan::cities::{self, CITIES};
@@ -21,16 +23,35 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const MENU: [&str; 8] = ["City", "Adhan", "Volume", "Test adhan", "Wi-Fi", "About", "Reset", "Back"];
+const MENU: [&str; 10] = ["City", "Adhan", "Volume", "Fajr volume", "Sonos", "Test adhan", "Wi-Fi", "About", "Reset", "Back"];
 const M_CITY: usize = 0;
 const M_ADHAN: usize = 1;
 const M_VOLUME: usize = 2;
-const M_TEST: usize = 3;
-const M_WIFI: usize = 4;
-const M_ABOUT: usize = 5;
-const M_RESET: usize = 6;
-const M_BACK: usize = 7;
+const M_FAJR: usize = 3;
+const M_SONOS: usize = 4;
+const M_TEST: usize = 5;
+const M_WIFI: usize = 6;
+const M_ABOUT: usize = 7;
+const M_RESET: usize = 8;
 const PREVIEW_SLOT: u8 = 1; // Dhuhr
+const FAJR_SLOT: u8 = 0;
+// Sonos screen rows. The speakers have their own screen: one row each, then search + back.
+const S_ON: usize = 0;
+const S_VOLUME: usize = 1;
+const S_FAJR: usize = 2;
+const S_SPEAKERS: usize = 3;
+const S_COUNT: usize = 5;
+/// Join Wi-Fi this long before a prayer when Sonos is on.
+const SONOS_LEAD_S: u32 = 75;
+/// Wi-Fi must be up within this long, or the box plays on its own speaker.
+const SONOS_WIFI_LIMIT: Duration = Duration::from_secs(15);
+/// A Sonos speaker must confirm it is audibly playing within this long, or the box's own
+/// speaker plays instead. This is the most an adhan can ever be late.
+const SONOS_CONFIRM: Duration = Duration::from_secs(5);
+/// Keep Wi-Fi up this long after joining for a prayer that then did not play.
+const SONOS_HOLD: Duration = Duration::from_secs(150);
+/// No daily sync this close to the next prayer time (a slow sync must never delay an adhan).
+const SYNC_CLEAR_S: u32 = 300;
 const PREVIEW_MS: u32 = 10_000;
 const EMERGENCY_START_MS: u32 = 5_000;
 const EMERGENCY_MS: u32 = 10_000;
@@ -44,7 +65,10 @@ enum Mode {
     Menu { sel: usize },
     City { sel: usize, setup: bool },
     AdhanToggles { sel: usize },
-    Volume { setup: bool },
+    Volume { setup: bool, fajr: bool },
+    Sonos { sel: usize },
+    SonosRooms { sel: usize },
+    SonosVolume { fajr: bool },
     Wifi { sel: usize },
     WifiForget,
     About,
@@ -63,7 +87,7 @@ enum Mode {
 impl Mode {
     fn is_setup(&self) -> bool {
         matches!(self, Mode::SetupWelcome | Mode::SetupQr | Mode::SetupSync { .. } | Mode::SetupDone { .. })
-            || matches!(self, Mode::City { setup: true, .. } | Mode::Volume { setup: true })
+            || matches!(self, Mode::City { setup: true, .. } | Mode::Volume { setup: true, .. })
     }
     /// Screens that warrant a flashing full refresh when entered.
     fn wants_full(&self) -> bool {
@@ -79,7 +103,16 @@ pub struct Hw {
     pub net: Net,
     pub store: Store,
     pub audio: Audio,
+    pub player: Player,
     pub console: Receiver<Cmd>,
+}
+
+/// An adhan that was handed to Sonos and is being watched.
+#[derive(Clone, Copy)]
+struct SonosAdhan {
+    slot: u8,
+    started: Instant,
+    confirmed: bool,
 }
 
 pub struct App {
@@ -104,6 +137,16 @@ pub struct App {
     next_sync: i64,
     sync_failures: u32,
     last_adhan: Option<(Date, Prayer)>,
+    // sonos
+    /// Wi-Fi is up because of Sonos (a prayer, the Sonos screens), not a sync.
+    sonos_wifi: bool,
+    /// The prayer Wi-Fi was last joined for, and when.
+    sonos_joined: Option<((Date, Prayer), Instant)>,
+    sonos_adhan: Option<SonosAdhan>,
+    /// Rows of the Sonos screen: speakers on the network plus ticked ones that are away.
+    sonos_list: Vec<Room>,
+    /// Test hook (`ezan sonos nowifi`): Sonos Wi-Fi joins use a network that does not exist.
+    test_no_wifi: bool,
 }
 
 impl App {
@@ -150,6 +193,11 @@ impl App {
             next_sync: 0,
             sync_failures: 0,
             last_adhan: None,
+            sonos_wifi: false,
+            sonos_joined: None,
+            sonos_adhan: None,
+            sonos_list: Vec::new(),
+            test_no_wifi: false,
         };
         app.schedule_first_sync();
         app
@@ -284,6 +332,8 @@ impl App {
             Mode::Menu { .. }
                 | Mode::City { setup: false, .. }
                 | Mode::AdhanToggles { .. }
+                | Mode::Sonos { .. }
+                | Mode::SonosRooms { .. }
                 | Mode::Wifi { .. }
                 | Mode::About
                 | Mode::ResetMenu { .. }
@@ -296,40 +346,287 @@ impl App {
         match self.mode.clone() {
             Mode::SetupQr => self.tick_portal(),
             Mode::SetupDone { until } if Instant::now() >= until => self.go(Mode::Home),
-            Mode::Adhan { .. } if !self.hw.audio.is_playing() => {
-                self.hw.buttons.ignore_held();
-                self.go(Mode::Home);
-            }
+            Mode::Adhan { .. } => self.tick_adhan(),
             _ => {}
         }
 
         if self.mode.is_setup() {
             return;
         }
+        self.tick_sonos_wifi();
 
         // Adhan trigger
-        if clock::valid() && !matches!(self.mode, Mode::Adhan { .. } | Mode::Volume { .. }) {
+        if clock::valid() && !matches!(self.mode, Mode::Adhan { .. } | Mode::Volume { .. } | Mode::SonosVolume { .. }) {
             let now = clock::local_now();
             if let Some(p) = schedule::due(now, &self.days) {
                 let key = (now.date, p);
                 if self.last_adhan != Some(key) {
                     self.last_adhan = Some(key);
-                    let enabled = p.adhan_bit().map(|b| self.s.adhan_mask & (1 << b) != 0).unwrap_or(false);
-                    if enabled && self.hw.audio.available {
+                    if self.adhan_enabled(p) && self.hw.audio.available {
                         log::info!("adhan: {p:?}");
-                        let at = now.minute_of_day();
-                        self.hw.audio.set_volume(self.s.volume);
-                        self.hw.audio.play(p.adhan_bit().unwrap(), None);
-                        self.go(Mode::Adhan { prayer: p, at });
+                        self.begin_adhan(p, now.minute_of_day());
                     }
                 }
             }
         }
 
-        // Daily sync (never during adhan)
-        if !matches!(self.mode, Mode::Adhan { .. }) && clock::now() >= self.next_sync {
-            self.sync_all();
+        // Daily sync: never during an adhan, while Sonos has Wi-Fi, or just before a prayer.
+        if !matches!(self.mode, Mode::Adhan { .. }) && !self.sonos_wifi && clock::now() >= self.next_sync {
+            let soon = clock::valid() && schedule::next(clock::local_now(), &self.days).is_some_and(|n| n.remaining_s <= SYNC_CLEAR_S);
+            if !soon {
+                self.sync_all();
+            }
         }
+    }
+
+    // ───────────────────────────── adhan ─────────────────────────────
+
+    fn adhan_enabled(&self, p: Prayer) -> bool {
+        p.adhan_bit().map(|b| self.s.adhan_mask & (1 << b) != 0).unwrap_or(false)
+    }
+
+    /// Play on the box's own speaker at this prayer's volume.
+    fn play_local(&mut self, slot: u8) {
+        self.hw.audio.set_volume(self.s.volume_for(slot));
+        self.hw.audio.play(slot, None);
+    }
+
+    /// Start the adhan now: on Sonos when the ticked speakers are ready, otherwise on the box.
+    fn begin_adhan(&mut self, prayer: Prayer, at: u16) {
+        let slot = prayer.adhan_bit().unwrap_or(PREVIEW_SLOT);
+        self.sonos_joined = None;
+        if self.s.sonos_active() && self.sonos_wifi && self.hw.player.state() == Sonos::Ready {
+            let volume = sonos::step_volume(self.s.sonos_step_for(slot));
+            log::info!("adhan: via Sonos at volume {volume}");
+            self.hw.player.play(slot, volume);
+            self.sonos_adhan = Some(SonosAdhan { slot, started: Instant::now(), confirmed: false });
+        } else {
+            if self.s.sonos_active() {
+                log::warn!("adhan: Sonos not ready ({:?}); using the box speaker", self.hw.player.state());
+            }
+            self.sonos_adhan = None;
+            self.play_local(slot);
+        }
+        self.go(Mode::Adhan { prayer, at });
+    }
+
+    /// While the Adhan screen is up: leave when it ends; if Sonos is not provably playing, the
+    /// box's own speaker takes over.
+    fn tick_adhan(&mut self) {
+        let Some(a) = self.sonos_adhan else {
+            if !self.hw.audio.is_playing() {
+                self.hw.buttons.ignore_held();
+                self.go(Mode::Home);
+            }
+            return;
+        };
+        let fallback = match self.hw.player.state() {
+            Sonos::Playing => {
+                if !a.confirmed {
+                    log::info!("adhan: Sonos confirmed after {} ms", a.started.elapsed().as_millis());
+                    self.sonos_adhan = Some(SonosAdhan { confirmed: true, ..a });
+                }
+                None
+            }
+            Sonos::Ended => {
+                self.sonos_adhan = None;
+                self.hw.buttons.ignore_held();
+                self.go(Mode::Home);
+                None
+            }
+            Sonos::Failed => Some("did not start"),
+            Sonos::Lost => Some("stopped early"),
+            _ if !a.confirmed && a.started.elapsed() > SONOS_CONFIRM => Some("not confirmed in time"),
+            _ => None,
+        };
+        if let Some(why) = fallback {
+            log::warn!("adhan: Sonos {why} after {} ms; playing on the box speaker", a.started.elapsed().as_millis());
+            self.hw.player.stop();
+            self.sonos_adhan = None;
+            self.play_local(a.slot);
+        }
+    }
+
+    // ───────────────────────────── sonos ─────────────────────────────
+
+    /// Join Wi-Fi and have the worker find the ticked speakers. Blocks for at most
+    /// `SONOS_WIFI_LIMIT`. Returns false when Wi-Fi did not come up.
+    fn sonos_join(&mut self) -> bool {
+        let (mut ssid, pass) = (self.s.ssid.clone(), self.s.pass.clone());
+        if self.test_no_wifi {
+            ssid = "ezanbox-no-such-network".into();
+        }
+        let t = Instant::now();
+        if !self.hw.net.connect_quick(&ssid, &pass, SONOS_WIFI_LIMIT) {
+            log::warn!("sonos: Wi-Fi not up after {} ms", t.elapsed().as_millis());
+            self.hw.net.stop();
+            self.sonos_wifi = false;
+            self.hw.buttons.ignore_held();
+            return false;
+        }
+        log::info!("sonos: Wi-Fi up in {} ms", t.elapsed().as_millis());
+        self.sonos_wifi = true;
+        self.hw.buttons.ignore_held();
+        true
+    }
+
+    /// Wi-Fi housekeeping for Sonos: join shortly before a prayer, leave when nothing needs it.
+    fn tick_sonos_wifi(&mut self) {
+        // Join ahead of the next adhan.
+        if self.s.sonos_active() && clock::valid() && self.hw.audio.available && !matches!(self.mode, Mode::Adhan { .. } | Mode::Volume { .. } | Mode::SonosVolume { .. }) {
+            if let Some(n) = schedule::next(clock::local_now(), &self.days) {
+                let key = (n.date, n.prayer);
+                if n.remaining_s <= SONOS_LEAD_S && self.adhan_enabled(n.prayer) && self.sonos_joined.map(|j| j.0) != Some(key) {
+                    log::info!("sonos: {:?} in {} s, joining Wi-Fi", n.prayer, n.remaining_s);
+                    self.sonos_joined = Some((key, Instant::now()));
+                    if self.sonos_join() {
+                        self.hw.player.prepare(&self.s.sonos_rooms, self.hw.net.sta_ip().unwrap_or(std::net::Ipv4Addr::UNSPECIFIED));
+                    }
+                }
+            }
+        }
+        // Leave when no screen, prayer or speaker clean-up needs the network.
+        if self.sonos_wifi {
+            let wanted = matches!(self.mode, Mode::Sonos { .. } | Mode::SonosRooms { .. } | Mode::SonosVolume { .. })
+                || self.sonos_adhan.is_some()
+                || self.hw.player.busy()
+                || self.sonos_joined.is_some_and(|j| j.1.elapsed() < SONOS_HOLD);
+            if !wanted {
+                self.sonos_leave();
+            }
+        }
+    }
+
+    /// Stop anything on Sonos, let the worker put the speakers back, then turn Wi-Fi off.
+    fn sonos_leave(&mut self) {
+        self.hw.player.release();
+        if !self.hw.player.wait_idle(Duration::from_secs(8)) {
+            log::warn!("sonos: worker still busy; turning Wi-Fi off anyway");
+        }
+        self.hw.net.stop();
+        self.sonos_wifi = false;
+        self.sonos_joined = None;
+        log::info!("sonos: Wi-Fi off");
+    }
+
+    /// Menu → Sonos. Opens at once; the network is only used by the screens below it.
+    fn open_sonos(&mut self) {
+        if self.s.ssid.is_empty() {
+            self.hw.buttons.ignore_held();
+            return self.message("Sonos", &["Set up Wi-Fi first:", "Menu, Wi-Fi."]);
+        }
+        self.go(Mode::Sonos { sel: S_ON });
+    }
+
+    /// Sonos → Speakers: look for speakers and show them.
+    fn open_sonos_rooms(&mut self, sel: usize) {
+        self.message("Speakers", &["Looking for speakers..."]);
+        self.sonos_scan();
+        self.go(Mode::SonosRooms { sel: sel.min(self.sonos_list.len() + 1) });
+    }
+
+    /// Rebuild the speaker rows from the network.
+    fn sonos_scan(&mut self) -> Vec<Speaker> {
+        let mut found = Vec::new();
+        if self.sonos_join() {
+            let known: Vec<_> = self.s.sonos_rooms.iter().map(|r| r.ip).collect();
+            match sonos::discover(&known) {
+                // A fixed line-out level ignores volume commands, so it can never be played safely.
+                Ok(v) => found = v.into_iter().filter(|s| !sonos::output_fixed(s.ip)).collect(),
+                Err(e) => log::warn!("sonos: {e:#}"),
+            }
+        }
+        // Keep ticked speakers' names and addresses current.
+        let mut changed = false;
+        for r in &mut self.s.sonos_rooms {
+            if let Some(sp) = found.iter().find(|s| s.id == r.id) {
+                if r.ip != sp.ip || r.name != sp.name {
+                    (r.ip, r.name) = (sp.ip, sp.name.clone());
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.hw.store.save(&self.s);
+        }
+        self.sonos_list = found.iter().map(|s| Room { id: s.id.clone(), name: s.name.clone(), ip: s.ip }).collect();
+        for r in &self.s.sonos_rooms {
+            if !self.sonos_list.iter().any(|l| l.id == r.id) {
+                self.sonos_list.push(r.clone());
+            }
+        }
+        log::info!("sonos: {} speakers found, {} ticked", found.len(), self.s.sonos_rooms.len());
+        self.hw.buttons.ignore_held();
+        found
+    }
+
+    fn sonos_select(&mut self, sel: usize) {
+        match sel {
+            S_ON => {
+                self.s.sonos_on = !self.s.sonos_on;
+                self.hw.store.save(&self.s);
+                self.dirty = true;
+            }
+            S_VOLUME | S_FAJR => self.open_sonos_volume(sel == S_FAJR),
+            S_SPEAKERS => self.open_sonos_rooms(0),
+            _ => self.go(Mode::Menu { sel: M_SONOS }),
+        }
+    }
+
+    /// Speakers screen: tick/untick a speaker, search again, or go back.
+    fn sonos_room_select(&mut self, sel: usize) {
+        let rooms = self.sonos_list.len();
+        if sel < rooms {
+            let room = self.sonos_list[sel].clone();
+            if let Some(at) = self.s.sonos_rooms.iter().position(|r| r.id == room.id) {
+                self.s.sonos_rooms.remove(at);
+            } else if self.s.sonos_rooms.len() < ROOMS_MAX {
+                self.s.sonos_rooms.push(room);
+                // Ticking a speaker means "play there": no second switch to remember.
+                self.s.sonos_on = true;
+            }
+            self.hw.store.save(&self.s);
+            self.dirty = true;
+        } else if sel == rooms {
+            self.open_sonos_rooms(usize::MAX);
+        } else {
+            self.go(Mode::Sonos { sel: S_SPEAKERS });
+        }
+    }
+
+    /// Sonos volume step being edited/previewed (Fajr "same" previews the normal level).
+    fn sonos_preview_volume(&self, fajr: bool) -> u8 {
+        sonos::step_volume(self.s.sonos_step_for(if fajr { FAJR_SLOT } else { PREVIEW_SLOT }))
+    }
+
+    /// Sonos → Volume / Fajr volume: play a sample on the ticked speakers and adjust by ear.
+    fn open_sonos_volume(&mut self, fajr: bool) {
+        self.hw.buttons.ignore_held();
+        if !self.s.sonos_rooms.is_empty() && !self.sonos_wifi {
+            self.message("Sonos", &["Connecting to Sonos..."]);
+            self.sonos_join();
+        }
+        if !self.s.sonos_rooms.is_empty() && self.sonos_wifi && self.hw.audio.available {
+            self.hw.player.prepare(&self.s.sonos_rooms, self.hw.net.sta_ip().unwrap_or(std::net::Ipv4Addr::UNSPECIFIED));
+            let t = Instant::now();
+            while self.hw.player.state() == Sonos::Preparing && t.elapsed() < Duration::from_secs(6) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if self.hw.player.state() == Sonos::Ready {
+                self.hw.player.play(if fajr { FAJR_SLOT } else { PREVIEW_SLOT }, self.sonos_preview_volume(fajr));
+            }
+        }
+        self.go(Mode::SonosVolume { fajr });
+    }
+
+    fn change_sonos_volume(&mut self, fajr: bool, delta: i8) {
+        if fajr {
+            self.s.sonos_fajr = fajr_step(self.s.sonos_step_for(FAJR_SLOT), self.s.sonos_volume, delta);
+        } else {
+            self.s.sonos_volume = (self.s.sonos_volume as i8 + delta).clamp(1, VOLUME_MAX as i8) as u8;
+        }
+        self.hw.player.volume(self.sonos_preview_volume(fajr));
+        self.dirty = true;
     }
 
     // ───────────────────────────── setup ─────────────────────────────
@@ -508,8 +805,8 @@ impl App {
             self.hw.store.save(&self.s);
             self.go(Mode::Home);
         } else {
-            self.start_preview();
-            self.go(Mode::Volume { setup: true });
+            self.start_preview(false);
+            self.go(Mode::Volume { setup: true, fajr: false });
         }
     }
 
@@ -519,10 +816,11 @@ impl App {
         self.go(Mode::SetupDone { until: Instant::now() + Duration::from_secs(3) });
     }
 
-    fn start_preview(&mut self) {
-        self.hw.audio.set_volume(self.s.volume);
+    fn start_preview(&mut self, fajr: bool) {
+        let slot = if fajr { FAJR_SLOT } else { PREVIEW_SLOT };
+        self.hw.audio.set_volume(self.s.volume_for(slot));
         if self.hw.audio.available {
-            self.hw.audio.play(PREVIEW_SLOT, Some(PREVIEW_MS));
+            self.hw.audio.play(slot, Some(PREVIEW_MS));
         }
     }
 
@@ -568,6 +866,8 @@ impl App {
 
             // Adhan playing: any button stops
             (Mode::Adhan { .. }, Short(_) | Long(_)) => {
+                self.hw.player.stop();
+                self.sonos_adhan = None;
                 self.hw.audio.stop();
                 self.hw.buttons.ignore_held();
                 self.go(Mode::Home);
@@ -579,10 +879,11 @@ impl App {
             (Mode::Menu { sel }, Long(Top)) => match sel {
                 M_CITY => self.go(Mode::City { sel: self.s.city, setup: false }),
                 M_ADHAN => self.go(Mode::AdhanToggles { sel: 0 }),
-                M_VOLUME => {
-                    self.start_preview();
-                    self.go(Mode::Volume { setup: false });
+                M_VOLUME | M_FAJR => {
+                    self.start_preview(sel == M_FAJR);
+                    self.go(Mode::Volume { setup: false, fajr: sel == M_FAJR });
                 }
+                M_SONOS => self.open_sonos(),
                 M_TEST => self.test_adhan(),
                 M_WIFI => self.go(Mode::Wifi { sel: 2 }),
                 M_ABOUT => self.go(Mode::About),
@@ -622,17 +923,33 @@ impl App {
             }
 
             // Volume (menu + setup step 5)
-            (Mode::Volume { .. }, Short(Top)) => self.change_volume(1),
-            (Mode::Volume { .. }, Short(Bottom)) => self.change_volume(-1),
-            (Mode::Volume { setup }, Long(Top)) => {
+            (Mode::Volume { fajr, .. }, Short(Top)) => self.change_volume(fajr, 1),
+            (Mode::Volume { fajr, .. }, Short(Bottom)) => self.change_volume(fajr, -1),
+            (Mode::Volume { setup, fajr }, Long(Top)) => {
                 self.hw.audio.stop();
                 self.hw.store.save(&self.s);
                 self.hw.buttons.ignore_held();
                 if setup {
                     self.finish_setup();
                 } else {
-                    self.go(Mode::Menu { sel: M_VOLUME });
+                    self.go(Mode::Menu { sel: if fajr { M_FAJR } else { M_VOLUME } });
                 }
+            }
+
+            // Sonos
+            (Mode::Sonos { sel }, Short(Top)) => self.go(Mode::Sonos { sel: up(sel, S_COUNT) }),
+            (Mode::Sonos { sel }, Short(Bottom)) => self.go(Mode::Sonos { sel: down(sel, S_COUNT) }),
+            (Mode::Sonos { sel }, Long(Top)) => self.sonos_select(sel),
+            (Mode::SonosRooms { sel }, Short(Top)) => self.go(Mode::SonosRooms { sel: up(sel, self.sonos_list.len() + 2) }),
+            (Mode::SonosRooms { sel }, Short(Bottom)) => self.go(Mode::SonosRooms { sel: down(sel, self.sonos_list.len() + 2) }),
+            (Mode::SonosRooms { sel }, Long(Top)) => self.sonos_room_select(sel),
+            (Mode::SonosVolume { fajr }, Short(Top)) => self.change_sonos_volume(fajr, 1),
+            (Mode::SonosVolume { fajr }, Short(Bottom)) => self.change_sonos_volume(fajr, -1),
+            (Mode::SonosVolume { fajr }, Long(Top)) => {
+                self.hw.player.stop();
+                self.hw.store.save(&self.s);
+                self.hw.buttons.ignore_held();
+                self.go(Mode::Sonos { sel: if fajr { S_FAJR } else { S_VOLUME } });
             }
 
             // Wi-Fi (rows 0–1 are info; 2 set up, 3 forget, 4 back)
@@ -695,11 +1012,15 @@ impl App {
         }
     }
 
-    fn change_volume(&mut self, delta: i8) {
-        self.s.volume = (self.s.volume as i8 + delta).clamp(1, VOLUME_MAX as i8) as u8;
-        self.hw.audio.set_volume(self.s.volume);
+    fn change_volume(&mut self, fajr: bool, delta: i8) {
+        if fajr {
+            self.s.fajr_volume = fajr_step(self.s.volume_for(FAJR_SLOT), self.s.volume, delta);
+        } else {
+            self.s.volume = (self.s.volume as i8 + delta).clamp(1, VOLUME_MAX as i8) as u8;
+        }
+        self.hw.audio.set_volume(self.s.volume_for(if fajr { FAJR_SLOT } else { PREVIEW_SLOT }));
         if !self.hw.audio.is_playing() {
-            self.start_preview();
+            self.start_preview(fajr);
         }
         self.dirty = true;
     }
@@ -720,9 +1041,18 @@ impl App {
             .map(|n| (n.prayer, n.at))
             .unwrap_or((Prayer::Dhuhr, now.minute_of_day()));
         log::info!("test adhan: {prayer:?}");
-        self.hw.audio.set_volume(self.s.volume);
-        self.hw.audio.play(prayer.adhan_bit().unwrap_or(1), None);
-        self.go(Mode::Adhan { prayer, at });
+        if self.s.sonos_active() {
+            // Same steps as before a real prayer, done on the spot.
+            self.message("Test adhan", &["Connecting to Sonos..."]);
+            if self.sonos_join() {
+                self.hw.player.prepare(&self.s.sonos_rooms, self.hw.net.sta_ip().unwrap_or(std::net::Ipv4Addr::UNSPECIFIED));
+                let t = Instant::now();
+                while self.hw.player.state() == Sonos::Preparing && t.elapsed() < Duration::from_secs(8) {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        }
+        self.begin_adhan(prayer, at);
     }
 
     fn on_cmd(&mut self, cmd: Cmd) {
@@ -768,7 +1098,30 @@ impl App {
                 self.last_input = Instant::now();
                 self.on_button(ev);
             }
+            Cmd::Adhan => {
+                println!("ezan> ok test adhan (sonos={})", self.s.sonos_active());
+                self.test_adhan();
+            }
+            Cmd::AdhanIn(mins) => {
+                // In memory only: a restart or the next sync brings the real times back.
+                let now = clock::local_now();
+                let at = now.minute_of_day() + mins;
+                // Isha is the last time of the day, so moving it cannot reorder anything.
+                match self.days.iter_mut().find(|d| d.date == now.date) {
+                    Some(day) if at < 1440 => {
+                        day.mins[Prayer::Isha as usize] = at;
+                        self.last_adhan = None;
+                        self.sonos_joined = None;
+                        println!("ezan> ok Isha moved to {:02}:{:02} until restart", at / 60, at % 60);
+                    }
+                    _ => println!("ezan> err cannot move Isha today"),
+                }
+                self.dirty = true;
+            }
+            Cmd::Sonos(arg) => self.on_sonos_cmd(&arg),
             Cmd::Stop => {
+                self.hw.player.stop();
+                self.sonos_adhan = None;
                 self.hw.audio.stop();
                 println!("ezan> ok stopped");
             }
@@ -783,7 +1136,7 @@ impl App {
             Cmd::Status => {
                 let now = clock::local_now();
                 println!(
-                    "ezan> ok v{VERSION} mode={:?} reset_reason={} uptime={}s city={} wifi={:?} clock_valid={} now={:?} days={} next={:?} next_sync_in={}s",
+                    "ezan> ok v{VERSION} mode={:?} reset_reason={} uptime={}s city={} wifi={:?} clock_valid={} now={:?} days={} next={:?} next_sync_in={}s volume={} fajr_volume={} sonos={} sonos_volume={} sonos_fajr={} sonos_rooms={:?} sonos_state={:?} sonos_wifi={} heap_internal={}KB",
                     std::mem::discriminant(&self.mode),
                     unsafe { esp_idf_svc::sys::esp_reset_reason() },
                     unsafe { esp_idf_svc::sys::esp_timer_get_time() } / 1_000_000,
@@ -793,13 +1146,73 @@ impl App {
                     now,
                     self.days.len(),
                     schedule::next(now, &self.days).map(|n| (n.prayer, n.at)),
-                    self.next_sync.saturating_sub(clock::now())
+                    self.next_sync.saturating_sub(clock::now()),
+                    self.s.volume,
+                    self.s.fajr_volume,
+                    self.s.sonos_on,
+                    self.s.sonos_volume,
+                    self.s.sonos_fajr,
+                    self.s.sonos_rooms.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+                    self.hw.player.state(),
+                    self.sonos_wifi,
+                    unsafe { esp_idf_svc::sys::heap_caps_get_free_size(esp_idf_svc::sys::MALLOC_CAP_INTERNAL) } / 1024
                 );
             }
         }
     }
 
+    /// `ezan sonos scan | on | off | tick NAME | untick NAME | vol N | fajr N` (testing over USB).
+    fn on_sonos_cmd(&mut self, arg: &str) {
+        let (cmd, rest) = arg.split_once(' ').unwrap_or((arg, ""));
+        let rest = rest.trim();
+        match cmd {
+            "scan" => {
+                let t = Instant::now();
+                let found = self.sonos_scan();
+                for s in &found {
+                    println!("ezan> speaker {:?} {} ticked={}", s.name, s.ip, self.s.sonos_rooms.iter().any(|r| r.id == s.id));
+                }
+                println!("ezan> ok {} speakers in {} ms", found.len(), t.elapsed().as_millis());
+                // tick_sonos_wifi turns Wi-Fi back off when nothing else needs it
+            }
+            "nowifi" => {
+                self.test_no_wifi = !self.test_no_wifi;
+                println!("ezan> ok pretend Wi-Fi is down for Sonos: {} (until restart)", self.test_no_wifi);
+            }
+            "on" | "off" => {
+                self.s.sonos_on = cmd == "on";
+                self.hw.store.save(&self.s);
+                println!("ezan> ok sonos {cmd}");
+            }
+            "tick" | "untick" => {
+                let found = self.sonos_scan();
+                let Some(sp) = found.iter().find(|s| s.name.eq_ignore_ascii_case(rest)) else {
+                    return println!("ezan> err no speaker named {rest:?}");
+                };
+                self.s.sonos_rooms.retain(|r| r.id != sp.id);
+                if cmd == "tick" && self.s.sonos_rooms.len() < ROOMS_MAX {
+                    self.s.sonos_rooms.push(Room { id: sp.id.clone(), name: sp.name.clone(), ip: sp.ip });
+                }
+                self.hw.store.save(&self.s);
+                println!("ezan> ok rooms {:?}", self.s.sonos_rooms.iter().map(|r| r.name.as_str()).collect::<Vec<_>>());
+            }
+            "vol" | "fajr" => {
+                let n: u8 = rest.parse().unwrap_or(0).min(VOLUME_MAX);
+                if cmd == "vol" {
+                    self.s.sonos_volume = n.max(1);
+                } else {
+                    self.s.sonos_fajr = n;
+                }
+                self.hw.store.save(&self.s);
+                println!("ezan> ok sonos volume {} fajr {}", self.s.sonos_volume, self.s.sonos_fajr);
+            }
+            _ => println!("ezan> err sonos scan|on|off|tick NAME|untick NAME|vol N|fajr N"),
+        }
+        self.dirty = true;
+    }
+
     fn factory_reset(&mut self) {
+        self.hw.player.stop();
         self.hw.audio.stop();
         self.message("Resetting...", &[]);
         self.hw.store.erase();
@@ -815,6 +1228,7 @@ impl App {
     }
 
     fn power_off(&mut self) {
+        self.hw.player.stop();
         self.hw.audio.stop();
         self.message("Off", &["Hold the bottom button", "to turn on."]);
         self.hw.epd.sleep();
@@ -886,7 +1300,14 @@ impl App {
                 let adhan = if self.s.adhan_mask == 0 { "Off" } else if self.s.adhan_mask == 0b11111 { "On" } else { "Some" };
                 let wifi = if self.s.ssid.is_empty() { "-".to_string() } else { trunc(&self.s.ssid, 11) };
                 let city = cities::get(self.s.city).name;
-                let vals: [&str; 8] = [city, adhan, &vol, "", &wifi, "", "", ""];
+                let fajr = if self.s.fajr_volume == 0 { "Same".to_string() } else { format!("{}/{}", self.s.fajr_volume, VOLUME_MAX) };
+                let sonos = match (self.s.sonos_on, self.s.sonos_rooms.len()) {
+                    (false, _) => "Off".to_string(),
+                    (true, 0) => "No rooms".to_string(),
+                    (true, 1) => "1 room".to_string(),
+                    (true, n) => format!("{n} rooms"),
+                };
+                let vals: [&str; 10] = [city, adhan, &vol, &fajr, &sonos, "", &wifi, "", "", ""];
                 ui::list(f, "Menu", MENU.len(), *sel, None, |i| (MENU[i], vals[i]), SELECT_HINT);
             }
             Mode::City { sel, .. } => {
@@ -905,7 +1326,18 @@ impl App {
                     "hold top: toggle",
                 )
             }
-            Mode::Volume { setup } => ui::volume(
+            Mode::Volume { fajr: true, .. } => ui::level_bars(
+                f,
+                "Fajr volume",
+                None,
+                if self.hw.audio.available { "Playing Fajr adhan sample..." } else { "" },
+                if self.s.fajr_volume == 0 { "Same as other prayers" } else { "Own volume for Fajr" },
+                self.s.volume_for(FAJR_SLOT),
+                VOLUME_MAX,
+                ["Top louder, bottom quieter", &format!("Other prayers: {}/{}", self.s.volume, VOLUME_MAX)],
+                "hold top: done",
+            ),
+            Mode::Volume { setup, .. } => ui::volume(
                 f,
                 if *setup { "Speaker check" } else { "Volume" },
                 if *setup { Some("5/5") } else { None },
@@ -914,6 +1346,66 @@ impl App {
                 self.hw.audio.available,
                 "hold top: done",
             ),
+            Mode::Sonos { sel } => {
+                let vol = format!("{}/{}", self.s.sonos_volume, VOLUME_MAX);
+                let fajr = if self.s.sonos_fajr == 0 { "Same".to_string() } else { format!("{}/{}", self.s.sonos_fajr, VOLUME_MAX) };
+                let speakers = match self.s.sonos_rooms.as_slice() {
+                    [] => "None".to_string(),
+                    [one] => trunc(&one.name, 11),
+                    many => format!("{} on", many.len()),
+                };
+                let rows: [(&str, &str); S_COUNT] = [
+                    ("Sonos", if self.s.sonos_on { "On" } else { "Off" }),
+                    ("Volume", &vol),
+                    ("Fajr volume", &fajr),
+                    ("Speakers", &speakers),
+                    ("Back", ""),
+                ];
+                ui::list(f, "Sonos", S_COUNT, *sel, None, |i| rows[i], SELECT_HINT)
+            }
+            Mode::SonosRooms { sel } => {
+                let n = self.sonos_list.len();
+                let names: Vec<String> = self.sonos_list.iter().map(|r| trunc(&r.name, 14)).collect();
+                let (rooms, list) = (&self.s.sonos_rooms, &self.sonos_list);
+                ui::list(
+                    f,
+                    "Speakers",
+                    n + 2,
+                    *sel,
+                    None,
+                    |i| match i {
+                        i if i < n => (names[i].as_str(), if rooms.iter().any(|r| r.id == list[i].id) { "On" } else { "Off" }),
+                        i if i == n => (if n == 0 { "None found: search" } else { "Search again" }, ""),
+                        _ => ("Back", ""),
+                    },
+                    "hold top: on/off",
+                )
+            }
+            Mode::SonosVolume { fajr } => {
+                let status = match self.hw.player.state() {
+                    _ if self.s.sonos_rooms.is_empty() => "No speakers ticked.",
+                    Sonos::Starting | Sonos::Playing | Sonos::Preparing | Sonos::Ready => "Playing on Sonos...",
+                    _ => "Not playing on Sonos.",
+                };
+                let label = match (*fajr, self.s.sonos_fajr) {
+                    (false, _) => "Sonos volume",
+                    (true, 0) => "Same as other prayers",
+                    (true, _) => "Own volume for Fajr",
+                };
+                let others = format!("Other prayers: {}/{}", self.s.sonos_volume, VOLUME_MAX);
+                let help = if *fajr { others.as_str() } else { "Applies to every ticked speaker." };
+                ui::level_bars(
+                    f,
+                    if *fajr { "Sonos: Fajr" } else { "Sonos volume" },
+                    None,
+                    status,
+                    label,
+                    self.s.sonos_step_for(if *fajr { FAJR_SLOT } else { PREVIEW_SLOT }),
+                    VOLUME_MAX,
+                    ["Top louder, bottom quieter", help],
+                    "hold top: done",
+                )
+            }
             Mode::Wifi { sel } => {
                 let net = if self.s.ssid.is_empty() { "none".to_string() } else { trunc(&self.s.ssid, 13) };
                 let last = if self.s.last_sync_ok == 0 {
@@ -979,6 +1471,14 @@ impl App {
             }
         }
     }
+}
+
+/// One press on a Fajr volume screen. It starts from the level Fajr plays at now (the normal
+/// level while it is "same"), so both buttons work from the first press. Landing on the normal
+/// level stores 0 = "same as the other prayers".
+fn fajr_step(current: u8, normal: u8, delta: i8) -> u8 {
+    let v = (current as i8 + delta).clamp(1, VOLUME_MAX as i8) as u8;
+    if v == normal { 0 } else { v }
 }
 
 fn trunc(s: &str, n: usize) -> String {

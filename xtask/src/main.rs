@@ -8,12 +8,17 @@
 //!   setup --ssid S --pass P [--city KEY]   send Wi-Fi/city to the device over USB serial
 //!   reset [--all]          clear device settings over USB serial (--all also erases audio)
 //!   status | sync          ask the device for its state / to sync now
+//!   sonos scan | play ROOM[,ROOM] [--slot N] [--step N] [--secs N]   run the firmware's Sonos code from this computer
 //!   monitor                serial monitor (interactive)
 //!   log [--secs N] [--reset] [--send CMD]   print device output for N seconds
 
 mod audio;
 mod cities;
 mod serial;
+#[allow(dead_code)]
+#[path = "../../firmware/src/sonos.rs"]
+mod sonos;
+mod sonos_cli;
 
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
@@ -187,6 +192,7 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Some("sonos") => sonos_cli::run(&args[1..]),
         Some("status") => serial::send(port.as_deref(), "status"),
         Some("sync") => serial::send(port.as_deref(), "sync"),
         Some("key") => {
@@ -231,7 +237,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         _ => {
-            eprintln!("{}", include_str!("main.rs").lines().take(14).collect::<Vec<_>>().join("\n"));
+            eprintln!("{}", include_str!("main.rs").lines().take(15).collect::<Vec<_>>().join("\n"));
             Ok(())
         }
     }

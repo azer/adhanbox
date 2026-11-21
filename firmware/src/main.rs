@@ -9,6 +9,8 @@ mod epd;
 mod net;
 mod portal;
 mod rtc;
+mod sonos;
+mod sonos_task;
 mod store;
 
 use esp_idf_svc::eventloop::EspSystemEventLoop;
@@ -66,9 +68,12 @@ fn main() -> anyhow::Result<()> {
     let store = store::Store::new(nvs.clone())?;
     let volume = store.load().volume;
     let audio = audio::Audio::start(i2s, i2c.clone(), audio_pins, volume);
+    // Network speakers fetch the recordings straight from the memory-mapped pack.
+    let pack = audio.pack;
+    let player = sonos_task::Player::start(Arc::new(move |slot| pack.and_then(|p| p.entry(slot).ok())));
     let sysloop = EspSystemEventLoop::take()?;
     let net = net::Net::new(p.modem, sysloop, nvs)?;
     let console = console::start();
 
-    app::App::new(app::Hw { epd, buttons, power, i2c, net, store, audio, console }).run()
+    app::App::new(app::Hw { epd, buttons, power, i2c, net, store, audio, player, console }).run()
 }

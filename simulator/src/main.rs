@@ -55,7 +55,7 @@ fn main() {
     ui::adhan(&mut f, Prayer::Asr, d.time(Prayer::Asr));
     save(&f, "05_adhan");
 
-    let menu = [("City", berlin.name), ("Adhan", "On"), ("Volume", "4/6"), ("Test adhan", ""), ("Wi-Fi", "HomeNet"), ("About", ""), ("Reset", ""), ("Back", "")];
+    let menu = [("City", berlin.name), ("Adhan", "On"), ("Volume", "4/6"), ("Fajr volume", "2/6"), ("Sonos", "2 rooms"), ("Test adhan", ""), ("Wi-Fi", "HomeNet"), ("About", ""), ("Reset", ""), ("Back", "")];
     ui::list(&mut f, "Menu", menu.len(), 0, None, |i| menu[i], ezan::strings::SELECT_HINT);
     save(&f, "06_menu");
     ui::list(&mut f, "City", CITIES.len(), 1, Some(1), |i| (CITIES[i].name, CITIES[i].utc_label), ezan::strings::SELECT_HINT);
@@ -77,6 +77,19 @@ fn main() {
     save(&f, "15_setup_volume");
     ui::message(&mut f, "You're set", None, &["Next: Asr at 14:02", "", "Press any button", "for the menu."], "", "");
     save(&f, "16_setup_done");
+
+    let sonos = [("Sonos", "On"), ("Volume", "3/6"), ("Fajr volume", "Same"), ("Speakers", "2 on"), ("Back", "")];
+    ui::list(&mut f, "Sonos", sonos.len(), 3, None, |i| sonos[i], ezan::strings::SELECT_HINT);
+    save(&f, "30_sonos");
+    let rooms = [("Bedroom", "On"), ("Kitchen", "Off"), ("Living Room", "On"), ("Search again", ""), ("Back", "")];
+    ui::list(&mut f, "Speakers", rooms.len(), 0, None, |i| rooms[i], "hold top: on/off");
+    save(&f, "31_sonos_speakers");
+    ui::level_bars(&mut f, "Sonos volume", None, "Playing on Sonos...", "Sonos volume", 3, 6, ["Top louder, bottom quieter", "Applies to every ticked speaker."], "hold top: done");
+    save(&f, "32_sonos_volume");
+    ui::level_bars(&mut f, "Fajr volume", None, "Playing Fajr adhan sample...", "Own volume for Fajr", 2, 6, ["Top louder, bottom quieter", "Other prayers: 4/6"], "hold top: done");
+    save(&f, "33_fajr_volume");
+    ui::level_bars(&mut f, "Fajr volume", None, "Playing Fajr adhan sample...", "Same as other prayers", 4, 6, ["Top louder, bottom quieter", "Other prayers: 4/6"], "hold top: done");
+    save(&f, "34_fajr_volume_same");
 
     ui::message(&mut f, "Reset settings?", None, &["Wi-Fi, city, volume and", "saved prayer times will", "be erased.", "", "Adhan recordings stay."], "press: cancel", "hold top: continue");
     save(&f, "20_reset_confirm");
